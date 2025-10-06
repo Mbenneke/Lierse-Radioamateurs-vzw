@@ -1,13 +1,28 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <SPIFFS.h>
+#include <SPI.h>
+#include <MFRC522.h>
 
-// WiFi instellingen - JOUW GEGEVENS
-const char* ssid = "bletchley";           // Jouw WiFi naam
-const char* password = "laptop!internet";         // Jouw WiFi wachtwoord
-const char* adminPassword = "admin123";    // Beheerderswachtwoord
+// WiFi instellingen - PAS DIT AAN!
+const char* ssid = "bletchley";
+const char* password = "laptop!internet";
+const char* adminPassword = "admin123";
 
 WebServer server(80);
+
+// RFID instellingen
+#define RST_PIN 21
+#define SS_PIN 5
+#define LED_PIN 12
+
+MFRC522 mfrc522(SS_PIN, RST_PIN);  // Vereenvoudigde initialisatie
+
+// Variabelen voor kaartkoppeling
+bool linkingMode = false;
+String userToLink = "";
+unsigned long linkingStartTime = 0;
+const unsigned long LINKING_TIMEOUT = 30000; // 30 seconden timeout
 
 // Eenvoudige functie om gebruikers op te slaan
 void addUser(const String& user) {
@@ -94,20 +109,129 @@ bool userExists(const String& user) {
   return exists;
 }
 
-// Toon alle gebruikers
-String listUsers() {
+// Kaart UID naar String converteren
+String getUIDString() {
+  String uidString = "";
+  for (byte i = 0; i < mfrc522.uid.size; i++) {
+    if (mfrc522.uid.uidByte[i] < 0x10) {
+      uidString += "0";
+    }
+    uidString += String(mfrc522.uid.uidByte[i], HEX);
+  }
+  uidString.toUpperCase();
+  return uidString;
+}
+
+// Kaart toevoegen aan gebruiker
+void addCardToUser(const String& user, const String& cardUID) {
+  File file = SPIFFS.open("/cards.txt", FILE_APPEND);
+  if(!file){
+    Serial.println("Fout bij openen cards.txt");
+    return;
+  }
+  
+  String line = user + "=" + cardUID;
+  if(file.println(line)){
+    Serial.println("Kaart gekoppeld: " + cardUID + " -> " + user);
+  } else {
+    Serial.println("Fout bij schrijven kaart");
+  }
+  file.close();
+}
+
+// Gebruiker zoeken bij kaart UID
+String getUserByCard(const String& cardUID) {
+  File file = SPIFFS.open("/cards.txt", FILE_READ);
+  if(!file) {
+    return "";
+  }
+
+  while(file.available()){
+    String line = file.readStringUntil('\n');
+    line.trim();
+    int separator = line.indexOf('=');
+    if(separator != -1) {
+      String storedUser = line.substring(0, separator);
+      String storedCard = line.substring(separator + 1);
+      if(storedCard == cardUID) {
+        file.close();
+        return storedUser;
+      }
+    }
+  }
+  file.close();
+  return "";
+}
+
+// Kaart verwijderen bij gebruiker
+void removeCardFromUser(const String& user) {
+  File file = SPIFFS.open("/cards.txt", FILE_READ);
+  if(!file) {
+    return;
+  }
+
+  String content;
+  while(file.available()){
+    String line = file.readStringUntil('\n');
+    line.trim();
+    int separator = line.indexOf('=');
+    if(separator != -1) {
+      String storedUser = line.substring(0, separator);
+      if(storedUser != user && line.length() > 0) {
+        content += line + "\n";
+      }
+    }
+  }
+  file.close();
+
+  file = SPIFFS.open("/cards.txt", FILE_WRITE);
+  if(file){
+    file.print(content);
+    file.close();
+    Serial.println("Kaarten verwijderd voor gebruiker: " + user);
+  }
+}
+
+// Toon alle gebruikers en kaarten
+String listUsersAndCards() {
   File file = SPIFFS.open("/users.txt", FILE_READ);
   if(!file) {
     return "Geen gebruikers gevonden";
   }
 
-  String userList = "Geregistreerde gebruikers:\n";
+  String userList = "Geregistreerde gebruikers en kaarten:\n\n";
   int count = 0;
+  
+  // Lees alle gebruikers
   while(file.available()){
-    String line = file.readStringUntil('\n');
-    line.trim();
-    if(line.length() > 0){
-      userList += "- " + line + "\n";
+    String user = file.readStringUntil('\n');
+    user.trim();
+    if(user.length() > 0){
+      userList += "👤 " + user + "\n";
+      
+      // Zoek gekoppelde kaarten
+      File cardFile = SPIFFS.open("/cards.txt", FILE_READ);
+      if(cardFile) {
+        bool hasCard = false;
+        while(cardFile.available()){
+          String line = cardFile.readStringUntil('\n');
+          line.trim();
+          int separator = line.indexOf('=');
+          if(separator != -1) {
+            String storedUser = line.substring(0, separator);
+            String storedCard = line.substring(separator + 1);
+            if(storedUser == user) {
+              userList += "   🪪 Kaart: " + storedCard + "\n";
+              hasCard = true;
+            }
+          }
+        }
+        cardFile.close();
+        if(!hasCard) {
+          userList += "   ❌ Geen kaart gekoppeld\n";
+        }
+      }
+      userList += "\n";
       count++;
     }
   }
@@ -129,6 +253,61 @@ bool checkAdminPassword() {
   return false;
 }
 
+// RFID kaart verwerken
+void handleRFID() {
+  // Reset de loop als er geen nieuwe kaart aanwezig is
+  if (!mfrc522.PICC_IsNewCardPresent()) {
+    return;
+  }
+
+  // Selecteer een van de kaarten
+  if (!mfrc522.PICC_ReadCardSerial()) {
+    return;
+  }
+
+  String cardUID = getUIDString();
+  Serial.println("Kaart gescand: " + cardUID);
+
+  if (linkingMode) {
+    // Koppel kaart aan gebruiker
+    addCardToUser(userToLink, cardUID);
+    linkingMode = false;
+    
+    // Bevestiging met LED
+    digitalWrite(LED_PIN, HIGH);
+    delay(500);
+    digitalWrite(LED_PIN, LOW);
+    delay(200);
+    digitalWrite(LED_PIN, HIGH);
+    delay(500);
+    digitalWrite(LED_PIN, LOW);
+    
+    Serial.println("Kaart " + cardUID + " gekoppeld aan gebruiker: " + userToLink);
+  } else {
+    // Toegangscontrole
+    String user = getUserByCard(cardUID);
+    if (user != "") {
+      // Toegang toegestaan
+      Serial.println("Toegang toegestaan voor: " + user);
+      digitalWrite(LED_PIN, HIGH);
+      delay(2000);
+      digitalWrite(LED_PIN, LOW);
+    } else {
+      // Toegang geweigerd
+      Serial.println("Toegang geweigerd voor kaart: " + cardUID);
+      for (int i = 0; i < 3; i++) {
+        digitalWrite(LED_PIN, HIGH);
+        delay(200);
+        digitalWrite(LED_PIN, LOW);
+        delay(200);
+      }
+    }
+  }
+
+  // Stop encryptie
+  mfrc522.PICC_HaltA();
+}
+
 // HTML homepage
 void handleRoot() {
   String html = "<!DOCTYPE html><html><head><title>ESP32 NAC System</title>";
@@ -142,39 +321,53 @@ void handleRoot() {
   html += "button:hover{background:#45a049;}";
   html += ".danger{background:#f44336;}";
   html += ".danger:hover{background:#da190b;}";
-  html += ".result{padding:10px;margin:10px 0;border-radius:4px;}";
-  html += ".success{background:#d4edda;color:#155724;border:1px solid #c3e6cb;}";
-  html += ".error{background:#f8d7da;color:#721c24;border:1px solid #f5c6cb;}";
-  html += ".info{background:#d1ecf1;color:#0c5460;border:1px solid #bee5eb;}";
+  html += ".warning{background:#ff9800;}";
+  html += ".warning:hover{background:#e68900;}";
+  html += ".status{background:#2196F3;color:white;padding:10px;border-radius:4px;margin:10px 0;}";
   html += "</style></head><body>";
   html += "<div class='container'>";
   html += "<h1>ESP32 NAC Beheerpaneel</h1>";
   html += "<p><strong>IP adres: " + WiFi.localIP().toString() + "</strong></p>";
   
+  if (linkingMode) {
+    html += "<div class='status'>";
+    html += "🔄 <strong>Koppelmodus actief!</strong><br>";
+    html += "Houd een RFID kaart bij de lezer om deze te koppelen aan: <strong>" + userToLink + "</strong><br>";
+    html += "Timeout over: " + String((LINKING_TIMEOUT - (millis() - linkingStartTime)) / 1000) + " seconden";
+    html += "</div>";
+  }
+  
   html += "<div class='section'><h2>Toegang Controleren</h2>";
   html += "<form action='/access' method='GET'>";
-  html += "<input type='text' name='name' placeholder='Gebruikersnaam' required>";
+  html += "<input type='text' name='name' placeholder='Gebruikersnaam'>";
   html += "<button type='submit'>Toegang Controleren</button>";
   html += "</form></div>";
   
   html += "<div class='section'><h2>Gebruiker Toevoegen</h2>";
   html += "<form action='/users/add' method='GET'>";
-  html += "<input type='text' name='name' placeholder='Gebruikersnaam' required>";
-  html += "<input type='password' name='password' placeholder='Beheerderswachtwoord' required>";
+  html += "<input type='text' name='name' placeholder='Gebruikersnaam'>";
+  html += "<input type='password' name='password' placeholder='Beheerderswachtwoord'>";
   html += "<button type='submit'>Gebruiker Toevoegen</button>";
+  html += "</form></div>";
+  
+  html += "<div class='section'><h2>RFID Kaart Koppelen</h2>";
+  html += "<form action='/users/linkcard' method='GET'>";
+  html += "<input type='text' name='name' placeholder='Gebruikersnaam'>";
+  html += "<input type='password' name='password' placeholder='Beheerderswachtwoord'>";
+  html += "<button type='submit' class='warning'>Kaart Koppelen</button>";
   html += "</form></div>";
   
   html += "<div class='section'><h2>Gebruiker Verwijderen</h2>";
   html += "<form action='/users/remove' method='GET' onsubmit='return confirm(\"Weet je het zeker?\")'>";
-  html += "<input type='text' name='name' placeholder='Gebruikersnaam' required>";
-  html += "<input type='password' name='password' placeholder='Beheerderswachtwoord' required>";
+  html += "<input type='text' name='name' placeholder='Gebruikersnaam'>";
+  html += "<input type='password' name='password' placeholder='Beheerderswachtwoord'>";
   html += "<button type='submit' class='danger'>Gebruiker Verwijderen</button>";
   html += "</form></div>";
   
-  html += "<div class='section'><h2>Gebruikers Lijst</h2>";
+  html += "<div class='section'><h2>Gebruikers & Kaarten Lijst</h2>";
   html += "<form action='/users/list' method='GET'>";
-  html += "<input type='password' name='password' placeholder='Beheerderswachtwoord' required>";
-  html += "<button type='submit'>Toon Gebruikers</button>";
+  html += "<input type='password' name='password' placeholder='Beheerderswachtwoord'>";
+  html += "<button type='submit'>Toon Gebruikers & Kaarten</button>";
   html += "</form></div>";
   
   html += "</div></body></html>";
@@ -227,8 +420,51 @@ void handleAddUser() {
     server.send(409, "text/plain", "⚠️ Gebruiker bestaat al: " + user);
   } else {
     addUser(user);
-    server.send(200, "text/plain", "✅ Gebruiker toegevoegd: " + user);
+    server.send(200, "text/plain", "✅ Gebruiker toegevoegd: " + user + "\n\nJe kunt nu een RFID kaart koppelen via 'RFID Kaart Koppelen'");
   }
+}
+
+void handleLinkCard() {
+  if(!server.hasArg("name") || !server.hasArg("password")){
+    server.send(400, "text/plain", "Ongeldig verzoek! Gebruik: /users/linkcard?name=gebruiker&password=admin123");
+    return;
+  }
+  
+  if(!checkAdminPassword()){
+    server.send(401, "text/plain", "❌ Niet geautoriseerd! Ongeldig wachtwoord.");
+    return;
+  }
+  
+  String user = server.arg("name");
+  user.trim();
+  
+  if(user.length() == 0) {
+    server.send(400, "text/plain", "Lege gebruikersnaam!");
+    return;
+  }
+  
+  if(!userExists(user)){
+    server.send(404, "text/plain", "⚠️ Gebruiker niet gevonden: " + user);
+    return;
+  }
+  
+  // Start koppelmodus
+  linkingMode = true;
+  userToLink = user;
+  linkingStartTime = millis();
+  
+  server.send(200, "text/html", 
+    "<html><body style='font-family: Arial; margin: 20px;'>"
+    "<h1>🔗 Kaart Koppelen</h1>"
+    "<div style='background: #e3f2fd; padding: 20px; border-radius: 10px;'>"
+    "<h2>Koppelmodus actief!</h2>"
+    "<p><strong>Gebruiker:</strong> " + user + "</p>"
+    "<p>Houd nu een RFID kaart bij de lezer...</p>"
+    "<p>Deze modus blijft 30 seconden actief.</p>"
+    "<p><a href='/'>Terug naar hoofdpagina</a></p>"
+    "</div>"
+    "</body></html>"
+  );
 }
 
 void handleRemoveUser() {
@@ -254,7 +490,8 @@ void handleRemoveUser() {
     server.send(404, "text/plain", "⚠️ Gebruiker niet gevonden: " + user);
   } else {
     removeUser(user);
-    server.send(200, "text/plain", "✅ Gebruiker verwijderd: " + user);
+    removeCardFromUser(user);
+    server.send(200, "text/plain", "✅ Gebruiker verwijderd: " + user + " (inclusief gekoppelde kaarten)");
   }
 }
 
@@ -269,7 +506,7 @@ void handleListUsers() {
     return;
   }
   
-  server.send(200, "text/plain", listUsers());
+  server.send(200, "text/plain", listUsersAndCards());
 }
 
 void handleNotFound() {
@@ -278,6 +515,7 @@ void handleNotFound() {
   message += "  GET /                 - Beheer interface\n";
   message += "  GET /access?name=USER - Toegang controleren\n";
   message += "  GET /users/add?name=USER&password=admin123\n";
+  message += "  GET /users/linkcard?name=USER&password=admin123\n";
   message += "  GET /users/remove?name=USER&password=admin123\n";
   message += "  GET /users/list?password=admin123\n";
   server.send(404, "text/plain", message);
@@ -288,7 +526,7 @@ void setup() {
   delay(1000);
 
   Serial.println();
-  Serial.println("=== ESP32 NAC System ===");
+  Serial.println("=== ESP32 NAC System met RFID ===");
   
   // SPIFFS starten
   if(!SPIFFS.begin(true)){
@@ -296,6 +534,16 @@ void setup() {
     return;
   }
   Serial.println("SPIFFS gestart");
+
+  // RFID lezer initialiseren
+  pinMode(LED_PIN, OUTPUT);
+  digitalWrite(LED_PIN, LOW);
+  
+  SPI.begin();
+  mfrc522.PCD_Init();
+  Serial.println("RFID lezer geïnitialiseerd");
+  Serial.print("RFID lezer versie: ");
+  mfrc522.PCD_DumpVersionToSerial();
 
   // WiFi verbinden
   Serial.print("Verbinden met WiFi: ");
@@ -324,6 +572,7 @@ void setup() {
   server.on("/", handleRoot);
   server.on("/access", handleAccess);
   server.on("/users/add", handleAddUser);
+  server.on("/users/linkcard", handleLinkCard);
   server.on("/users/remove", handleRemoveUser);
   server.on("/users/list", handleListUsers);
   server.onNotFound(handleNotFound);
@@ -333,9 +582,28 @@ void setup() {
   Serial.println("Open je browser en ga naar: http://" + WiFi.localIP().toString());
   Serial.println();
   Serial.println("Standaard beheerderswachtwoord: admin123");
+  Serial.println("Vergeet niet het wachtwoord aan te passen in de code!");
 }
 
 void loop() {
   server.handleClient();
-  delay(2);
+  
+  // Verwerk RFID kaarten
+  handleRFID();
+  
+  // Timeout voor koppelmodus
+  if (linkingMode && (millis() - linkingStartTime > LINKING_TIMEOUT)) {
+    linkingMode = false;
+    Serial.println("Koppelmodus timeout - geen kaart gescand");
+    
+    // Geef timeout signaal met LED
+    for (int i = 0; i < 5; i++) {
+      digitalWrite(LED_PIN, HIGH);
+      delay(100);
+      digitalWrite(LED_PIN, LOW);
+      delay(100);
+    }
+  }
+  
+  delay(100);
 }
