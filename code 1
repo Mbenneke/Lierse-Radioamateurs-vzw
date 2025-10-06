@@ -1,0 +1,341 @@
+#include <WiFi.h>
+#include <WebServer.h>
+#include <SPIFFS.h>
+
+// WiFi instellingen - JOUW GEGEVENS
+const char* ssid = "bletchley";           // Jouw WiFi naam
+const char* password = "laptop!internet";         // Jouw WiFi wachtwoord
+const char* adminPassword = "admin123";    // Beheerderswachtwoord
+
+WebServer server(80);
+
+// Eenvoudige functie om gebruikers op te slaan
+void addUser(const String& user) {
+  if(user.length() == 0) {
+    Serial.println("Lege gebruikersnaam, niet toegevoegd");
+    return;
+  }
+  
+  File file = SPIFFS.open("/users.txt", FILE_APPEND);
+  if(!file){
+    Serial.println("Fout bij openen users.txt");
+    return;
+  }
+  
+  if(file.println(user)){
+    Serial.println("Gebruiker toegevoegd: " + user);
+  } else {
+    Serial.println("Fout bij schrijven gebruiker");
+  }
+  file.close();
+}
+
+// Gebruiker verwijderen
+void removeUser(const String& user) {
+  if(user.length() == 0) {
+    Serial.println("Lege gebruikersnaam, niet verwijderd");
+    return;
+  }
+  
+  File file = SPIFFS.open("/users.txt", FILE_READ);
+  if(!file) {
+    Serial.println("Geen users.txt bestand gevonden");
+    return;
+  }
+
+  String content;
+  bool userFound = false;
+  
+  while(file.available()){
+    String line = file.readStringUntil('\n');
+    line.trim();
+    if(line != user && line.length() > 0){
+      content += line + "\n";
+    } else if(line == user) {
+      userFound = true;
+    }
+  }
+  file.close();
+
+  file = SPIFFS.open("/users.txt", FILE_WRITE);
+  if(file){
+    file.print(content);
+    file.close();
+    if(userFound) {
+      Serial.println("Gebruiker verwijderd: " + user);
+    } else {
+      Serial.println("Gebruiker niet gevonden: " + user);
+    }
+  } else {
+    Serial.println("Fout bij openen users.txt voor schrijven");
+  }
+}
+
+// Check of gebruiker bestaat
+bool userExists(const String& user) {
+  if(user.length() == 0) return false;
+  
+  File file = SPIFFS.open("/users.txt", FILE_READ);
+  if(!file) {
+    Serial.println("Geen users.txt bestand gevonden bij userExists");
+    return false;
+  }
+
+  bool exists = false;
+  while(file.available()){
+    String line = file.readStringUntil('\n');
+    line.trim();
+    if(line == user){
+      exists = true;
+      break;
+    }
+  }
+  file.close();
+  return exists;
+}
+
+// Toon alle gebruikers
+String listUsers() {
+  File file = SPIFFS.open("/users.txt", FILE_READ);
+  if(!file) {
+    return "Geen gebruikers gevonden";
+  }
+
+  String userList = "Geregistreerde gebruikers:\n";
+  int count = 0;
+  while(file.available()){
+    String line = file.readStringUntil('\n');
+    line.trim();
+    if(line.length() > 0){
+      userList += "- " + line + "\n";
+      count++;
+    }
+  }
+  file.close();
+  
+  if(count == 0) {
+    return "Geen gebruikers geregistreerd";
+  }
+  userList += "Totaal: " + String(count) + " gebruiker(s)";
+  return userList;
+}
+
+// Controleer beheerderswachtwoord
+bool checkAdminPassword() {
+  if(server.hasArg("password")){
+    String pwd = server.arg("password");
+    return (pwd == adminPassword);
+  }
+  return false;
+}
+
+// HTML homepage
+void handleRoot() {
+  String html = "<!DOCTYPE html><html><head><title>ESP32 NAC System</title>";
+  html += "<meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'>";
+  html += "<style>body{font-family:Arial,sans-serif;margin:20px;background:#f5f5f5;}";
+  html += ".container{max-width:800px;margin:0 auto;background:white;padding:20px;border-radius:10px;box-shadow:0 2px 10px rgba(0,0,0,0.1);}";
+  html += "h1{color:#333;text-align:center;}";
+  html += ".section{margin:20px 0;padding:15px;border:1px solid #ddd;border-radius:5px;}";
+  html += "input[type='text'],input[type='password']{width:200px;padding:8px;margin:5px;border:1px solid #ccc;border-radius:4px;}";
+  html += "button{background:#4CAF50;color:white;padding:10px 15px;border:none;border-radius:4px;cursor:pointer;margin:5px;}";
+  html += "button:hover{background:#45a049;}";
+  html += ".danger{background:#f44336;}";
+  html += ".danger:hover{background:#da190b;}";
+  html += ".result{padding:10px;margin:10px 0;border-radius:4px;}";
+  html += ".success{background:#d4edda;color:#155724;border:1px solid #c3e6cb;}";
+  html += ".error{background:#f8d7da;color:#721c24;border:1px solid #f5c6cb;}";
+  html += ".info{background:#d1ecf1;color:#0c5460;border:1px solid #bee5eb;}";
+  html += "</style></head><body>";
+  html += "<div class='container'>";
+  html += "<h1>ESP32 NAC Beheerpaneel</h1>";
+  html += "<p><strong>IP adres: " + WiFi.localIP().toString() + "</strong></p>";
+  
+  html += "<div class='section'><h2>Toegang Controleren</h2>";
+  html += "<form action='/access' method='GET'>";
+  html += "<input type='text' name='name' placeholder='Gebruikersnaam' required>";
+  html += "<button type='submit'>Toegang Controleren</button>";
+  html += "</form></div>";
+  
+  html += "<div class='section'><h2>Gebruiker Toevoegen</h2>";
+  html += "<form action='/users/add' method='GET'>";
+  html += "<input type='text' name='name' placeholder='Gebruikersnaam' required>";
+  html += "<input type='password' name='password' placeholder='Beheerderswachtwoord' required>";
+  html += "<button type='submit'>Gebruiker Toevoegen</button>";
+  html += "</form></div>";
+  
+  html += "<div class='section'><h2>Gebruiker Verwijderen</h2>";
+  html += "<form action='/users/remove' method='GET' onsubmit='return confirm(\"Weet je het zeker?\")'>";
+  html += "<input type='text' name='name' placeholder='Gebruikersnaam' required>";
+  html += "<input type='password' name='password' placeholder='Beheerderswachtwoord' required>";
+  html += "<button type='submit' class='danger'>Gebruiker Verwijderen</button>";
+  html += "</form></div>";
+  
+  html += "<div class='section'><h2>Gebruikers Lijst</h2>";
+  html += "<form action='/users/list' method='GET'>";
+  html += "<input type='password' name='password' placeholder='Beheerderswachtwoord' required>";
+  html += "<button type='submit'>Toon Gebruikers</button>";
+  html += "</form></div>";
+  
+  html += "</div></body></html>";
+  
+  server.send(200, "text/html", html);
+}
+
+void handleAccess() {
+  if(server.hasArg("name")){
+    String user = server.arg("name");
+    user.trim();
+    
+    if(user.length() == 0) {
+      server.send(400, "text/plain", "Lege gebruikersnaam!");
+      return;
+    }
+    
+    if(userExists(user)){
+      server.send(200, "text/plain", "✅ Toegang toegestaan voor: " + user);
+      Serial.println("Toegang toegestaan: " + user);
+    } else {
+      server.send(403, "text/plain", "❌ Toegang geweigerd voor: " + user);
+      Serial.println("Toegang geweigerd: " + user);
+    }
+  } else {
+    server.send(400, "text/plain", "Geen gebruikersnaam opgegeven!");
+  }
+}
+
+void handleAddUser() {
+  if(!server.hasArg("name") || !server.hasArg("password")){
+    server.send(400, "text/plain", "Ongeldig verzoek! Gebruik: /users/add?name=gebruiker&password=admin123");
+    return;
+  }
+  
+  if(!checkAdminPassword()){
+    server.send(401, "text/plain", "❌ Niet geautoriseerd! Ongeldig wachtwoord.");
+    return;
+  }
+  
+  String user = server.arg("name");
+  user.trim();
+  
+  if(user.length() == 0) {
+    server.send(400, "text/plain", "Lege gebruikersnaam!");
+    return;
+  }
+  
+  if(userExists(user)){
+    server.send(409, "text/plain", "⚠️ Gebruiker bestaat al: " + user);
+  } else {
+    addUser(user);
+    server.send(200, "text/plain", "✅ Gebruiker toegevoegd: " + user);
+  }
+}
+
+void handleRemoveUser() {
+  if(!server.hasArg("name") || !server.hasArg("password")){
+    server.send(400, "text/plain", "Ongeldig verzoek! Gebruik: /users/remove?name=gebruiker&password=admin123");
+    return;
+  }
+  
+  if(!checkAdminPassword()){
+    server.send(401, "text/plain", "❌ Niet geautoriseerd! Ongeldig wachtwoord.");
+    return;
+  }
+  
+  String user = server.arg("name");
+  user.trim();
+  
+  if(user.length() == 0) {
+    server.send(400, "text/plain", "Lege gebruikersnaam!");
+    return;
+  }
+  
+  if(!userExists(user)){
+    server.send(404, "text/plain", "⚠️ Gebruiker niet gevonden: " + user);
+  } else {
+    removeUser(user);
+    server.send(200, "text/plain", "✅ Gebruiker verwijderd: " + user);
+  }
+}
+
+void handleListUsers() {
+  if(!server.hasArg("password")){
+    server.send(400, "text/plain", "Wachtwoord vereist! Gebruik: /users/list?password=admin123");
+    return;
+  }
+  
+  if(!checkAdminPassword()){
+    server.send(401, "text/plain", "❌ Niet geautoriseerd! Ongeldig wachtwoord.");
+    return;
+  }
+  
+  server.send(200, "text/plain", listUsers());
+}
+
+void handleNotFound() {
+  String message = "Pagina niet gevonden.\n\n";
+  message += "Beschikbare endpoints:\n";
+  message += "  GET /                 - Beheer interface\n";
+  message += "  GET /access?name=USER - Toegang controleren\n";
+  message += "  GET /users/add?name=USER&password=admin123\n";
+  message += "  GET /users/remove?name=USER&password=admin123\n";
+  message += "  GET /users/list?password=admin123\n";
+  server.send(404, "text/plain", message);
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+
+  Serial.println();
+  Serial.println("=== ESP32 NAC System ===");
+  
+  // SPIFFS starten
+  if(!SPIFFS.begin(true)){
+    Serial.println("SPIFFS kon niet starten!");
+    return;
+  }
+  Serial.println("SPIFFS gestart");
+
+  // WiFi verbinden
+  Serial.print("Verbinden met WiFi: ");
+  Serial.println(ssid);
+  
+  WiFi.begin(ssid, password);
+  
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+    delay(500);
+    Serial.print(".");
+    attempts++;
+  }
+  
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("\nWiFi verbinding mislukt!");
+    Serial.println("Controleer SSID en wachtwoord");
+    return;
+  }
+  
+  Serial.println("\nWiFi verbonden!");
+  Serial.print("IP adres: ");
+  Serial.println(WiFi.localIP());
+
+  // Server routes
+  server.on("/", handleRoot);
+  server.on("/access", handleAccess);
+  server.on("/users/add", handleAddUser);
+  server.on("/users/remove", handleRemoveUser);
+  server.on("/users/list", handleListUsers);
+  server.onNotFound(handleNotFound);
+
+  server.begin();
+  Serial.println("HTTP server gestart!");
+  Serial.println("Open je browser en ga naar: http://" + WiFi.localIP().toString());
+  Serial.println();
+  Serial.println("Standaard beheerderswachtwoord: admin123");
+}
+
+void loop() {
+  server.handleClient();
+  delay(2);
+}
