@@ -1,0 +1,16 @@
+/*
+ * ESP32 NAC System met RFID
+ * 
+ * Copyright (c) 2025 Ken Cardon & Matthias Benneke
+ * 
+ * Deze code is gelicentieerd onder de Creative Commons Attribution-NonCommercial-NoDerivatives 4.0 International licentie.
+ * Je mag een kopie van de licentie vinden op: http://creativecommons.org/licenses/by-nc-nd/4.0/
+ * 
+ * Toegestaan:
+ * - Delen: kopiëren en verspreiden in elk medium of formaat
+ * 
+ * Onder de volgende voorwaarden:
+ * - Naamsvermelding: Je moet gepaste credit geven, een link naar de licentie geven en aangeven of er wijzigingen zijn gemaakt.
+ * - NietCommercieel: Je mag het materiaal niet gebruiken voor commerciële doeleinden.
+ * - GeenAfgeleideWerken: Als je het materiaal remixt, transformeert of erop voortbouwt, mag je het aangepaste materiaal niet verspreiden.
+ */
